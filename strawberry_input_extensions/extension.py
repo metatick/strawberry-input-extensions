@@ -402,11 +402,12 @@ class InputExtensionsExtension(FieldExtension):
     def apply(self, field: StrawberryField) -> None:
         """Apply the extension to a GraphQL field.
         
-        Extracts argument resolvers from the field's annotations.
+        Extracts argument resolvers from the field's arguments.
         """
-        for field_name, field in field.base_resolver.annotations.items():
-            if resolver := get_extension_resolver(field):
-                self.argument_resolvers[field_name] = resolver
+
+        for argument in field.arguments:
+            if resolver := get_extension_resolver(argument.type):
+                self.argument_resolvers[argument.python_name] = resolver
 
     def resolve(self, next_: SyncExtensionResolver, source: Any, info: Info, **kwargs: dict) -> Any:
         """Resolve input arguments synchronously."""
