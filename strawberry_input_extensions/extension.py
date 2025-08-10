@@ -313,7 +313,10 @@ class InputResolver(ExtensionResolver):
         """Get resolver for input field."""
         extensions = get_field_extensions_from_metadata(field)
         input_base_type = get_input_base_type(field)
-        annotations = getattr(input_base_type, '__annotations__', {})
+        # use annotations from class and superclasses
+        annotations = {}
+        for base in reversed(input_base_type.__mro__):
+            annotations.update(getattr(base, '__annotations__', {}))
         child_resolvers: Dict[str, ExtensionResolver] = {}
         has_child_resolvers = False
         for child_field_name, child_field in annotations.items():
