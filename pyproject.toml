@@ -1,6 +1,6 @@
 [project]
 name = "strawberry-input-extensions"
-version = "0.0.1"
+version = "0.0.2"
 description = "Strawberry GraphQL input validation/transformation extensions"
 authors = [
     { name = "Michael Thomas", email = "michael@metatick.net"}
