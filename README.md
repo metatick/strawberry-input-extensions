@@ -2,6 +2,10 @@
 
 A simple extension system for Strawberry GraphQL that provides declarative input validation and transformation through Python type annotations. This extension allows you to add validation rules and transformations to your GraphQL inputs while maintaining clean, readable code.
 
+
+### This package should currently be considered unstable, and not used in production. Don't count on SemVer versioning being representative of non-breaking changes until a stable 1.0 release.  
+
+
 ## Overview
 
 This module implements a flexible extension system for Strawberry GraphQL that enables validation and transformation of input values in GraphQL operations. It supports both synchronous and asynchronous operations, and handles nested input types, lists, and optional values.
