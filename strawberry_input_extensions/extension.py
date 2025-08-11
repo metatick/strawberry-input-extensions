@@ -25,7 +25,7 @@ Example usage:
 """
 
 import functools
-from typing import Annotated, get_origin, get_args, Union, List, Any, Callable, Dict, Tuple, Optional
+from typing import Annotated, get_origin, get_args, Union, List, Any, Callable, Dict, Tuple, Optional, Awaitable
 
 from strawberry import UNSET, Info
 from strawberry.extensions import FieldExtension
@@ -37,6 +37,41 @@ from strawberry.utils.await_maybe import await_maybe
 from .exceptions import InputExtensionFieldException, InputExtensionException, VALIDATION_EXCEPTION_CLASSES
 
 
+class Path:
+    """
+    Represents a field in a path structure, with a reference to parent fields and the value
+    associated with the current field.
+
+    The class can be used either for construction of exceptions, or to allow extensions to access sibling/ancestor fields
+    if need be. For example:
+    class MyExtension(InputExtension):
+        def resolve(self, value, info, next_, path):
+            if path.parent.value.sibling_field != 'foo':
+                raise ValueError('This can only be configured if siblingField is "foo"')
+            return next_(value)
+
+    Attributes:
+        value: Any
+            The value associated with the current node of the path.
+        path: str or int
+            The identifier for the current node in the path structure. This could be a
+            string representing a key (e.g., in dictionaries) or an integer representing
+            an index (e.g., in lists).
+        parent: Optional[Path]
+            An optional reference to the parent node of the current path. If None, the
+            current node is treated as the root of the path hierarchy.
+    """
+    def __init__(self, value: Any, path: Union[str, int], parent: Optional['Path'] = None):
+        self.value = value
+        self.path = path
+        self.parent = parent
+
+    def get_full_path(self):
+        if self.parent is None:
+            return [self.path]
+        return self.parent.get_full_path() + [self.path]
+
+
 class InputExtensionMetaclass(type):
     """Metaclass for InputExtension that provides instance caching.
     
@@ -45,25 +80,27 @@ class InputExtensionMetaclass(type):
     """
     @functools.lru_cache(maxsize=1000, typed=True)
     def __call__(cls, *args, **kwargs):
-        self = cls.__new__(cls, *args, **kwargs)
+        self = cls.__new__(cls, *args, **kwargs)  # type: ignore  # pyright: ignore[reportCallIssue]
         cls.__init__(self, *args, **kwargs)
         return self
 
 
 class InputExtension(metaclass=InputExtensionMetaclass):
+
     """Base class for creating custom input extensions.
-    
+
     Extensions can modify or validate input values in GraphQL operations.
     Subclasses must implement the resolve method.
     """
-    def resolve(self, value: Any, info: Info, next_: Callable, path: List[Union[str, int]]):
+
+    def resolve(self, value: Any, info: Info, next_: Callable, path: Path) -> Any:
         """Process an input value and optionally transform it.
         
         Args:
             value: The input value to process
             info: GraphQL resolver info
             next_: The next extension in the chain
-            path: Path to the current field
+            path: The path of the current field
             
         Returns:
             Processed value
@@ -73,7 +110,7 @@ class InputExtension(metaclass=InputExtensionMetaclass):
         """
         raise NotImplementedError(f"{self.__class__.__name__}.resolve Not Implemented")
 
-    async def resolve_async(self, value: Any, info: Info, next_: Callable, path: List[Union[str, int]]):
+    async def resolve_async(self, value: Any, info: Info, next_: Callable, path: Path) -> Awaitable[Any]:
         """Asynchronous version of resolve."""
         return await await_maybe(self.resolve(value, info, next_, path))
 
@@ -83,13 +120,13 @@ class InputExtension(metaclass=InputExtensionMetaclass):
             params = (params,)
         type_ = params[0]
         args = params[1:]
-        return Annotated[type_, cls(*args)]
+        return Annotated[type_, cls(*args)]  # type: ignore  # pyright: ignore[reportCallIssue]
 
     @classmethod
     def decorator(cls, *args):
         """Creates a decorator for applying the extension."""
         def _decorator(type_):
-            return Annotated[type_, cls(*args)]
+            return Annotated[type_, cls(*args)]  # type: ignore  # pyright: ignore[reportCallIssue]
         return _decorator
 
 
@@ -158,7 +195,7 @@ class ExtensionResolver:
         """Initialize resolver with a list of extensions."""
         self.extensions = extensions
 
-    def resolve_extensions(self, value: Any, path: List[Union[str, int]], info: Info):
+    def resolve_extensions(self, value: Any, path: Path, info: Info):
         """Execute extensions chain synchronously."""
         if not self.extensions:
             return value, []
@@ -166,15 +203,15 @@ class ExtensionResolver:
         try:
             chain = extension_tail
             for extension in self.extensions:
-                chain = functools.partial(extension.resolve, next_=chain, info=info, path=path)
+                chain = functools.partial(extension.resolve, info=info, next_=chain, path=path)
             return chain(value), []
         except InputExtensionFieldException as e:
-            e.path = path + e.path
-            return value, [e]
+            error = InputExtensionFieldException(e.exception, path.get_full_path() + e.path, info)
+            return value, [error]
         except tuple(VALIDATION_EXCEPTION_CLASSES) as e:
-            return value, [InputExtensionFieldException(e, path, info)]
+            return value, [InputExtensionFieldException(e, path.get_full_path(), info)]
 
-    async def resolve_extensions_async(self, value: Any, path: List[Union[str, int]], info: Info):
+    async def resolve_extensions_async(self, value: Any, path: Path, info: Info):
         """Execute extensions chain asynchronously."""
         if not self.extensions:
             return value, []
@@ -182,17 +219,18 @@ class ExtensionResolver:
         try:
             chain = extension_tail
             for extension in self.extensions:
-                chain = functools.partial(extension.resolve_async, next_=chain, info=info, path=path)
+                chain = functools.partial(extension.resolve_async,info=info, next_=chain, path=path)
             return await chain(value), []
         except InputExtensionFieldException as e:
-            return value, [e]
+            error = InputExtensionFieldException(e.exception, path.get_full_path() + e.path, info)
+            return value, [error]
         except tuple(VALIDATION_EXCEPTION_CLASSES) as e:
-            return value, [InputExtensionFieldException(e, path, info)]
+            return value, [InputExtensionFieldException(e, path.get_full_path(), info)]
 
-    def resolve(self, value: Any, path: List[Union[str, int]], info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
+    def resolve(self, value: Any, path: Path, info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
         return self.resolve_extensions(value, path, info)
 
-    async def resolve_async(self, value: Any, path: List[Union[str, int]], info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
+    async def resolve_async(self, value: Any, path: Path, info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
         return await self.resolve_extensions_async(value, path, info)
 
 
@@ -231,7 +269,7 @@ class OptionalResolver(ExtensionResolver):
         self.child_resolver = child_resolver
         super().__init__(extensions)
 
-    def resolve(self, value: Any, path: List[str], info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
+    def resolve(self, value: Any, path: Path, info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
         """Resolve optional field synchronously."""
         if value is not None and self.child_resolver:
             new_value, errors = self.child_resolver.resolve(value, path, info)
@@ -240,7 +278,7 @@ class OptionalResolver(ExtensionResolver):
             value = new_value
         return super().resolve(value, path, info)
 
-    async def resolve_async(self, value: Any, path: List[Union[str, int]], info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
+    async def resolve_async(self, value: Any, path: Path, info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
         """Resolve optional field asynchronously."""
         if value is not None and self.child_resolver:
             new_value, errors = await self.child_resolver.resolve_async(value, path, info)
@@ -272,13 +310,13 @@ class ListResolver(ExtensionResolver):
         self.child_resolver = child_resolver
         super().__init__(extensions)
 
-    def resolve(self, value: List, path: List[Union[str, int]], info: Info) -> Tuple[List, List[InputExtensionFieldException]]:
+    def resolve(self, value: List, path: Path, info: Info) -> Tuple[List, List[InputExtensionFieldException]]:
         """Resolve list field synchronously."""
         if self.child_resolver:
             errors = []
             new_list = []
             for index, item in enumerate(value):
-                result, child_errors = self.child_resolver.resolve(item, path + [index], info)
+                result, child_errors = self.child_resolver.resolve(item, Path(item, index, path), info)
                 new_list.append(result)
                 if child_errors:
                     errors.extend(child_errors)
@@ -287,13 +325,13 @@ class ListResolver(ExtensionResolver):
             value = new_list
         return super().resolve(value, path, info)
 
-    async def resolve_async(self, value: List, path: List[Union[str, int]], info: Info) -> Tuple[List, List[InputExtensionFieldException]]:
+    async def resolve_async(self, value: List, path: Path, info: Info) -> Tuple[List, List[InputExtensionFieldException]]:
         """Resolve list field asynchronously."""
         if self.child_resolver:
             errors = []
             new_list = []
             for index, item in enumerate(value):
-                result, child_errors = await self.child_resolver.resolve_async(item, path + [index], info)
+                result, child_errors = await self.child_resolver.resolve_async(item, Path(item, index, path), info)
                 new_list.append(result)
                 if child_errors:
                     errors.extend(child_errors)
@@ -334,7 +372,7 @@ class InputResolver(ExtensionResolver):
         self.child_resolvers = child_resolvers
         super().__init__(extensions)
 
-    def resolve(self, value: Any, path: List[Union[str, int]], info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
+    def resolve(self, value: Any, path: Path, info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
         """Resolve input field synchronously."""
         if self.child_resolvers:
             errors = []
@@ -343,7 +381,7 @@ class InputResolver(ExtensionResolver):
                 if (field_value := getattr(value, child_field_name, UNSET)) is not UNSET:
                     new_values[child_field_name], child_errors = child_resolver.resolve(
                         field_value,
-                        path + [child_field_name],
+                        Path(field_value, child_field_name, path),
                         info
                     )
                     if child_errors:
@@ -354,7 +392,7 @@ class InputResolver(ExtensionResolver):
                 setattr(value, child_field_name, child_field_value)
         return super().resolve(value, path, info)
 
-    async def resolve_async(self, value: Any, path: List[Union[str, int]], info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
+    async def resolve_async(self, value: Any, path: Path, info: Info) -> Tuple[Any, List[InputExtensionFieldException]]:
         """Resolve input field asynchronously."""
         if self.child_resolvers:
             errors = []
@@ -363,7 +401,7 @@ class InputResolver(ExtensionResolver):
                 if (field_value := getattr(value, child_field_name, UNSET)) is not UNSET:
                     new_values[child_field_name], child_errors = await child_resolver.resolve_async(
                         field_value,
-                        path + [child_field_name],
+                        Path(field_value, child_field_name, path),
                         info
                     )
                     if child_errors:
@@ -418,7 +456,7 @@ class InputExtensionsExtension(FieldExtension):
             errors: List[InputExtensionFieldException] = []
             for key, argument_resolver in self.argument_resolvers.items():
                 if (value := kwargs.get(key, UNSET)) is not UNSET:
-                    kwargs[key], argument_errors = argument_resolver.resolve(value, [key], info)
+                    kwargs[key], argument_errors = argument_resolver.resolve(value, Path(value, key), info)
                     if argument_errors:
                         errors.extend(argument_errors)
             if errors:
@@ -431,7 +469,7 @@ class InputExtensionsExtension(FieldExtension):
             errors: List[InputExtensionFieldException] = []
             for key, argument_resolver in self.argument_resolvers.items():
                 if (value := kwargs.get(key, UNSET)) is not UNSET:
-                    kwargs[key], argument_errors = await argument_resolver.resolve_async(value, [key], info)
+                    kwargs[key], argument_errors = await argument_resolver.resolve_async(value, Path(value, key), info)
                     if argument_errors:
                         errors.extend(argument_errors)
             if errors:
